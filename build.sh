@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-echo "Running test-app/build.sh..."
-
 set -e
 
 make -e -C test-pmd

@@ -1,34 +1,5 @@
-/*-
- *   BSD LICENSE
- *
- *   Copyright(c) 2014 Tilera Corporation. All rights reserved.
- *
- *   Redistribution and use in source and binary forms, with or without
- *   modification, are permitted provided that the following conditions
- *   are met:
- *
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in
- *       the documentation and/or other materials provided with the
- *       distribution.
- *     * Neither the name of Tilera Corporation nor the names of its
- *       contributors may be used to endorse or promote products derived
- *       from this software without specific prior written permission.
- *
- *   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- *   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- *   OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
- *   SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
- *   LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- *   DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- *   THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- *   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
- *   OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
+/* SPDX-License-Identifier: BSD-3-Clause
+ * Copyright(c) 2010-2014 Intel Corporation
  */
 
 #include <stdarg.h>
@@ -66,26 +37,25 @@
 #include <rte_flow.h>
 
 #include "testpmd.h"
-#if defined(RTE_ARCH_X86)
-#include "macswap_sse.h"
-#elif defined(RTE_MACHINE_CPUFLAG_NEON)
-#include "macswap_neon.h"
-#else
-#include "macswap.h"
-#endif
 
 /*
- * MAC swap forwarding mode: Swap the source and the destination Ethernet
- * addresses of packets before forwarding them.
+ * Forwarding of packets in MAC mode.
+ * Change the source and the destination Ethernet addressed of packets
+ * before forwarding them.
  */
 static void
-pkt_burst_mac_swap(struct fwd_stream *fs)
+pkt_burst_mac_forward(struct fwd_stream *fs)
 {
 	struct rte_mbuf  *pkts_burst[MAX_PKT_BURST];
 	struct rte_port  *txp;
+	struct rte_mbuf  *mb;
+	struct ether_hdr *eth_hdr;
+	uint32_t retry;
 	uint16_t nb_rx;
 	uint16_t nb_tx;
-	uint32_t retry;
+	uint16_t i;
+	uint64_t ol_flags = 0;
+	uint64_t tx_offloads;
 #ifdef RTE_TEST_PMD_RECORD_CORE_CYCLES
 	uint64_t start_tsc;
 	uint64_t end_tsc;
@@ -109,9 +79,30 @@ pkt_burst_mac_swap(struct fwd_stream *fs)
 #endif
 	fs->rx_packets += nb_rx;
 	txp = &ports[fs->tx_port];
-
-	do_macswap(pkts_burst, nb_rx, txp);
-
+	tx_offloads = txp->dev_conf.txmode.offloads;
+	if (tx_offloads	& DEV_TX_OFFLOAD_VLAN_INSERT)
+		ol_flags = PKT_TX_VLAN_PKT;
+	if (tx_offloads & DEV_TX_OFFLOAD_QINQ_INSERT)
+		ol_flags |= PKT_TX_QINQ_PKT;
+	if (tx_offloads & DEV_TX_OFFLOAD_MACSEC_INSERT)
+		ol_flags |= PKT_TX_MACSEC;
+	for (i = 0; i < nb_rx; i++) {
+		if (likely(i < nb_rx - 1))
+			rte_prefetch0(rte_pktmbuf_mtod(pkts_burst[i + 1],
+						       void *));
+		mb = pkts_burst[i];
+		eth_hdr = rte_pktmbuf_mtod(mb, struct ether_hdr *);
+		ether_addr_copy(&peer_eth_addrs[fs->peer_addr],
+				&eth_hdr->d_addr);
+		ether_addr_copy(&ports[fs->tx_port].eth_addr,
+				&eth_hdr->s_addr);
+		mb->ol_flags &= IND_ATTACHED_MBUF | EXT_ATTACHED_MBUF;
+		mb->ol_flags |= ol_flags;
+		mb->l2_len = sizeof(struct ether_hdr);
+		mb->l3_len = sizeof(struct ipv4_hdr);
+		mb->vlan_tci = txp->tx_vlan_id;
+		mb->vlan_tci_outer = txp->tx_vlan_id_outer;
+	}
 	nb_tx = rte_eth_tx_burst(fs->tx_port, fs->tx_queue, pkts_burst, nb_rx);
 	/*
 	 * Retry if necessary
@@ -124,6 +115,7 @@ pkt_burst_mac_swap(struct fwd_stream *fs)
 					&pkts_burst[nb_tx], nb_rx - nb_tx);
 		}
 	}
+
 	fs->tx_packets += nb_tx;
 #ifdef RTE_TEST_PMD_RECORD_BURST_STATS
 	fs->tx_burst_stats.pkt_burst_spread[nb_tx]++;
@@ -141,9 +133,9 @@ pkt_burst_mac_swap(struct fwd_stream *fs)
 #endif
 }
 
-struct fwd_engine mac_swap_engine = {
-	.fwd_mode_name  = "macswap",
+struct fwd_engine mac_fwd_engine = {
+	.fwd_mode_name  = "mac",
 	.port_fwd_begin = NULL,
 	.port_fwd_end   = NULL,
-	.packet_fwd     = pkt_burst_mac_swap,
+	.packet_fwd     = pkt_burst_mac_forward,
 };
